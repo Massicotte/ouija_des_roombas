@@ -77,46 +77,51 @@ def draw_grid_on_view(view, mapper, cols, rows):
                     cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), 2, cv2.LINE_AA)
 
 
-def word_extent(word, start, direction, cols, rows):
-    """Renvoie (sc, sr, direction, len) si le mot tient dans la grille, sinon None."""
+def word_cell(word, start, cols, rows):
+    """Un mot occupe UNE SEULE case : sa case de départ (ex: 'B3').
+    Renvoie (col, row) de cette case, ou None si la case n'existe pas."""
     import re
     sm = re.match(r"^([A-Z])(\d+)$", str(start).upper())
     if not sm:
         return None
     sc = ord(sm.group(1)) - ord("A")
     sr = int(sm.group(2)) - 1
-    n = len(str(word).replace(" ", "").upper())
     if sc < 0 or sc >= cols or sr < 0 or sr >= rows:
         return None
-    if str(direction).upper() == "H":
-        if sc + n > cols:
-            return None
-    else:
-        if sr + n > rows:
-            return None
-    return sc, sr, str(direction).upper(), n
+    return sc, sr
 
 
 def draw_words_on_view(view, mapper, cols, rows, words):
-    """Dessine chaque mot lettre par lettre dans ses cases (H ou V).
-    Les mots qui ne tiennent pas dans la grille ne sont PAS dessinés."""
+    """Dessine chaque mot ENTIER dans SA case (une lettre ne prend plus une case).
+    La police est réduite pour que le mot tienne dans la case, quelle que soit sa longueur."""
     for word, start, direction in words:
-        ext = word_extent(word, start, direction, cols, rows)
-        if ext is None:
+        cell = word_cell(word, start, cols, rows)
+        if cell is None:
             continue
-        sc, sr, direction, n = ext
-        letters = list(str(word).replace(" ", "").upper())
-        for k, letter in enumerate(letters[:n]):
-            if direction == "H":
-                c, r = sc + k, sr
-            else:
-                c, r = sc, sr + k
-            px = mapper.to_pixels((c + 0.5) / cols, (r + 0.5) / rows)
-            cv2.putText(view, letter, (int(px[0]) - 10, int(px[1]) + 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (120, 220, 255), 2, cv2.LINE_AA)
+        c, r = cell
+        text = str(word).replace(" ", "").upper()
+        # géométrie de la case en pixels (par homographie inverse)
+        top_left = mapper.to_pixels(c / cols, r / rows)
+        bot_right = mapper.to_pixels((c + 1) / cols, (r + 1) / rows)
+        cw = abs(bot_right[0] - top_left[0])
+        ch = abs(bot_right[1] - top_left[1])
+        center = mapper.to_pixels((c + 0.5) / cols, (r + 0.5) / rows)
+        # police la plus grande qui tient dans la case (avec une petite marge)
+        thickness = 1 if cw < 120 else 2  # trait fin si la case est petite
+        scale = 0.1
+        while scale < 5.0:
+            (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale + 0.05, thickness)
+            if tw > cw * 0.92 or th > ch * 0.92:
+                break
+            scale += 0.05
+        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
+        org = (int(center[0] - tw / 2), int(center[1] + th / 2))
+        cv2.putText(view, text, org, cv2.FONT_HERSHEY_SIMPLEX,
+                    scale, (120, 220, 255), thickness, cv2.LINE_AA)
 
 
-def word_for_cell(cell, words):
+def word_for_cell(cell, words, cols=8, rows=8):
+    """Le mot n'est actif QUE dans sa propre case (une case = un mot)."""
     import re
     m = re.match(r"^([A-Z])(\d+)$", cell)
     if not m:
@@ -124,17 +129,11 @@ def word_for_cell(cell, words):
     col = ord(m.group(1)) - ord("A")
     row = int(m.group(2)) - 1
     for word, start, direction in words:
-        sm = re.match(r"^([A-Z])(\d+)$", str(start).upper())
-        if not sm:
+        c = word_cell(word, start, cols, rows)
+        if c is None:
             continue
-        sc, sr = ord(sm.group(1)) - ord("A"), int(sm.group(2)) - 1
-        wlen = len(str(word).replace(" ", ""))
-        if str(direction).upper() == "H":
-            if row == sr and sc <= col < sc + wlen:
-                return str(word).upper()
-        else:
-            if col == sc and sr <= row < sr + wlen:
-                return str(word).upper()
+        if c == (col, row):
+            return str(word).upper()
     return None
 
 
@@ -285,12 +284,9 @@ class App:
         ttk.Label(row, text="Mot:").pack(side=tk.LEFT)
         self.word_var = tk.StringVar()
         ttk.Entry(row, textvariable=self.word_var, width=12).pack(side=tk.LEFT, padx=3)
-        ttk.Label(row, text="Départ:").pack(side=tk.LEFT)
+        ttk.Label(row, text="Case:").pack(side=tk.LEFT)
         self.start_var = tk.StringVar()
         ttk.Entry(row, textvariable=self.start_var, width=4).pack(side=tk.LEFT, padx=3)
-        self.dir_var = tk.StringVar(value=list(DIRECTIONS)[0])
-        ttk.Combobox(row, textvariable=self.dir_var, width=6, state="readonly",
-                     values=["H", "V"]).pack(side=tk.LEFT, padx=3)
         ttk.Button(row, text="+", width=3, command=self._add_word).pack(side=tk.LEFT, padx=3)
         self.word_list = tk.Listbox(w, height=5)
         self.word_list.pack(fill=tk.X, pady=4)
@@ -395,23 +391,21 @@ class App:
     def refresh_words(self):
         self.word_list.delete(0, tk.END)
         for word, start, direction in self.words:
-            self.word_list.insert(tk.END, f"{word.upper()}  — {start.upper()}  — {direction}")
+            self.word_list.insert(tk.END, f"{word.upper()}  — case {start.upper()}")
 
     def _add_word(self):
         word = self.word_var.get().strip().upper()
         start = self.start_var.get().strip().upper()
         if not word or not start:
-            messagebox.showerror("Champ manquant", "Remplis le mot ET sa case de départ.")
+            messagebox.showerror("Champ manquant", "Remplis le mot ET sa case.")
             return
-        if word_extent(word, start, self.dir_var.get(),
-                      int(self.cols_var.get()), int(self.rows_var.get())) is None:
+        if word_cell(word, start, int(self.cols_var.get()), int(self.rows_var.get())) is None:
             messagebox.showerror(
-                "Mot trop long",
-                f'"{word}" depuis {start} ne tient pas dans la grille '
-                f'({self.cols_var.get()}x{self.rows_var.get()}). '
-                "Raccourcis le mot ou déplace son point de départ.")
+                "Case invalide",
+                f'La case {start} n\'existe pas dans la grille '
+                f'({self.cols_var.get()} colonnes x {self.rows_var.get()} lignes).')
             return
-        self.words.append((word, start, self.dir_var.get()))
+        self.words.append((word, start, "H"))  # direction ignorée : 1 mot = 1 case
         self.word_var.set(""); self.start_var.set("")
         self.refresh_words()
         self._save_cfg()
@@ -566,7 +560,7 @@ class App:
                 self.last_collision_t = now
                 mid = ((gA[0] + gB[0]) / 2, (gA[1] + gB[1]) / 2)
                 cell = cell_name(mid[0], mid[1], cols, rows)
-                word = word_for_cell(cell, self.words)
+                word = word_for_cell(cell, self.words, cols, rows)
                 mid_px = ((posA[0] + posB[0]) / 2, (posA[1] + posB[1]) / 2)
                 self._on_collision(cell, word, mid_px)
 
