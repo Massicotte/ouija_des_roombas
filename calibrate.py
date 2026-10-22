@@ -1,10 +1,5 @@
 """
-OUTIL DE CALIBRATION 🔧
-Fenêtre séparée pour tout régler SANS toucher au code :
-  - colonnes / lignes de la grille
-  - les mots placés dans la grille (mot + case de départ + direction)
-  - les 4 coins de la grille (clics sur un aperçu caméra) -> homographie
-  - la TAILLE DE L'EXPLOSION (slider avec aperçu animé)
+ca sert à callibrer les fenetres etc
 
 Usage:
     python calibrate.py
