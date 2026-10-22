@@ -150,6 +150,9 @@ class App:
         self.frame_h = self.cfg["cam_height"]
         self.lock = threading.Lock()
         self.running = True
+        self.cap = None
+        self.latest_frame = None
+        self.camera_error = None
 
         self._build_ui()
         self._open_outputs()
@@ -157,9 +160,6 @@ class App:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         # la caméra s'ouvre en ARRIÈRE-PLAN : la fenêtre s'affiche immédiatement,
         # avec un statut visible pendant l'ouverture (qui peut être lente sous Windows)
-        self.cap = None
-        self.latest_frame = None
-        self.camera_error = None
         threading.Thread(target=self._open_camera, daemon=True).start()
         self.root.after(10, self._display_loop)
 
