@@ -65,13 +65,13 @@ def draw_grid_on_view(view, mapper, cols, rows):
     font_scale = max(0.4, min(1.0, cell_w / 80.0))
     # lettres AU-DESSUS de la grille (v négatif = hors grille), centrées sur chaque colonne
     for i in range(cols):
-        px = mapper.to_pixels((i + 0.5) / cols, -0.6 / rows)
+        px = mapper.to_pixels((i + 0.5) / cols, -0.22 / rows)
         cv2.putText(view, LETTERS[i],
                     (int(px[0]) - 8, int(px[1])),
                     cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), 2, cv2.LINE_AA)
     # chiffres À GAUCHE de la grille (u négatif = hors grille), centrés sur chaque ligne
     for j in range(rows):
-        px = mapper.to_pixels(-0.6 / cols, (j + 0.5) / rows)
+        px = mapper.to_pixels(-0.22 / cols, (j + 0.5) / rows)
         cv2.putText(view, str(j + 1),
                     (int(px[0]) - 6, int(px[1]) + 8),
                     cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), 2, cv2.LINE_AA)
@@ -335,6 +335,14 @@ class App:
         ttk.Spinbox(s, from_=0.1, to=2.0, increment=0.1, width=5,
                     textvariable=self.dist_var,
                     command=lambda: self._apply_cfg("collision_dist_cells", float(self.dist_var.get()))).pack(anchor="w")
+        ttk.Label(s, text="Délai entre collisions (s):").pack(anchor="w")
+        cd = ttk.Frame(s); cd.pack(fill=tk.X)
+        self.cooldown_var = tk.DoubleVar(value=float(self.cfg["collision_cooldown_s"]))
+        self.cooldown_label = tk.StringVar()
+        ttk.Scale(cd, from_=0.5, to=30.0, variable=self.cooldown_var,
+                  command=lambda *_: self._on_cooldown_slider()).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Label(cd, textvariable=self.cooldown_label, width=6).pack(side=tk.LEFT)
+        self._update_cooldown_label()
         ttk.Button(s, text="💾 Sauvegarder la config", command=self._save_cfg).pack(fill=tk.X, pady=(6, 0))
 
         self.refresh_words()
@@ -358,6 +366,13 @@ class App:
 
     def _update_scale_label(self, *_):
         self.scale_label.set(f"x{self.scale_var.get():.1f}")
+
+    def _on_cooldown_slider(self):
+        self._apply_cfg("collision_cooldown_s", round(self.cooldown_var.get(), 1))
+        self._update_cooldown_label()
+
+    def _update_cooldown_label(self, *_):
+        self.cooldown_label.set(f"{self.cooldown_var.get():.1f}s")
 
     def _save_cfg(self):
         self.cfg["words"] = [list(w) for w in self.words]
