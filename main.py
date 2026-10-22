@@ -43,51 +43,74 @@ VIDEO_H = 540
 
 
 def draw_grid_on_view(view, mapper, cols, rows):
-    """Dessine la grille (lignes + lettres + chiffres) sur la vue caméra
-    en projetant les coordonnées grille vers les pixels via l'homographie inverse."""
-    # lignes verticales (séparateurs de colonnes) + lettres en haut de chaque colonne
+    """Dessine la grille sur la vue caméra via l'homographie inverse.
+    Les lettres (A, B, C..) sont placées HORS de la grille, au-dessus des colonnes,
+    et les chiffres (1, 2, 3..) HORS de la grille, à gauche des lignes."""
     for i in range(cols + 1):
         u = i / cols
         p0 = mapper.to_pixels(u, 0.0)
         p1 = mapper.to_pixels(u, 1.0)
         cv2.line(view, (int(p0[0]), int(p0[1])), (int(p1[0]), int(p1[1])),
                  (255, 255, 255), 1, cv2.LINE_AA)
-        if i < cols:
-            center = mapper.to_pixels(u + 0.5 / cols, 0.5 / rows)
-            cv2.putText(view, LETTERS[i],
-                        (int(center[0]) - 6, int(center[1]) + 6),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
-    # lignes horizontales (séparateurs de lignes) + chiffres à gauche de chaque ligne
     for j in range(rows + 1):
         v = j / rows
         p0 = mapper.to_pixels(0.0, v)
         p1 = mapper.to_pixels(1.0, v)
         cv2.line(view, (int(p0[0]), int(p0[1])), (int(p1[0]), int(p1[1])),
                  (255, 255, 255), 1, cv2.LINE_AA)
-        if j < rows:
-            center = mapper.to_pixels(0.5 / cols, v + 0.5 / rows)
-            cv2.putText(view, str(j + 1),
-                        (int(center[0]) - 6, int(center[1]) + 6),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+    # taille du texte proportionnelle à la taille d'une case (en pixels)
+    cell_px = mapper.to_pixels(0.5 / cols, 0.5 / rows)
+    edge = mapper.to_pixels(0.0, 0.0)
+    cell_w = abs(cell_px[0] - edge[0]) * 2
+    font_scale = max(0.4, min(1.0, cell_w / 80.0))
+    # lettres AU-DESSUS de la grille (v négatif = hors grille), centrées sur chaque colonne
+    for i in range(cols):
+        px = mapper.to_pixels((i + 0.5) / cols, -0.6 / rows)
+        cv2.putText(view, LETTERS[i],
+                    (int(px[0]) - 8, int(px[1])),
+                    cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), 2, cv2.LINE_AA)
+    # chiffres À GAUCHE de la grille (u négatif = hors grille), centrés sur chaque ligne
+    for j in range(rows):
+        px = mapper.to_pixels(-0.6 / cols, (j + 0.5) / rows)
+        cv2.putText(view, str(j + 1),
+                    (int(px[0]) - 6, int(px[1]) + 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), 2, cv2.LINE_AA)
+
+
+def word_extent(word, start, direction, cols, rows):
+    """Renvoie (sc, sr, direction, len) si le mot tient dans la grille, sinon None."""
+    import re
+    sm = re.match(r"^([A-Z])(\d+)$", str(start).upper())
+    if not sm:
+        return None
+    sc = ord(sm.group(1)) - ord("A")
+    sr = int(sm.group(2)) - 1
+    n = len(str(word).replace(" ", "").upper())
+    if sc < 0 or sc >= cols or sr < 0 or sr >= rows:
+        return None
+    if str(direction).upper() == "H":
+        if sc + n > cols:
+            return None
+    else:
+        if sr + n > rows:
+            return None
+    return sc, sr, str(direction).upper(), n
 
 
 def draw_words_on_view(view, mapper, cols, rows, words):
-    """Dessine chaque mot lettre par lettre dans ses cases (H ou V)."""
-    import re
+    """Dessine chaque mot lettre par lettre dans ses cases (H ou V).
+    Les mots qui ne tiennent pas dans la grille ne sont PAS dessinés."""
     for word, start, direction in words:
-        sm = re.match(r"^([A-Z])(\d+)$", str(start).upper())
-        if not sm:
+        ext = word_extent(word, start, direction, cols, rows)
+        if ext is None:
             continue
-        sc = ord(sm.group(1)) - ord("A")
-        sr = int(sm.group(2)) - 1
+        sc, sr, direction, n = ext
         letters = list(str(word).replace(" ", "").upper())
-        for k, letter in enumerate(letters):
-            if str(direction).upper() == "H":
+        for k, letter in enumerate(letters[:n]):
+            if direction == "H":
                 c, r = sc + k, sr
             else:
                 c, r = sc, sr + k
-            if c >= cols or r >= rows:
-                break
             px = mapper.to_pixels((c + 0.5) / cols, (r + 0.5) / rows)
             cv2.putText(view, letter, (int(px[0]) - 10, int(px[1]) + 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.0, (120, 220, 255), 2, cv2.LINE_AA)
@@ -380,6 +403,14 @@ class App:
         if not word or not start:
             messagebox.showerror("Champ manquant", "Remplis le mot ET sa case de départ.")
             return
+        if word_extent(word, start, self.dir_var.get(),
+                      int(self.cols_var.get()), int(self.rows_var.get())) is None:
+            messagebox.showerror(
+                "Mot trop long",
+                f'"{word}" depuis {start} ne tient pas dans la grille '
+                f'({self.cols_var.get()}x{self.rows_var.get()}). '
+                "Raccourcis le mot ou déplace son point de départ.")
+            return
         self.words.append((word, start, self.dir_var.get()))
         self.word_var.set(""); self.start_var.set("")
         self.refresh_words()
@@ -412,16 +443,19 @@ class App:
         self.count_var.set(f"{self.collision_count} collision{'s' if self.collision_count > 1 else ''}")
 
     def _on_collision(self, cell, word, mid_px):
+        """Explosion à chaque collision, mais la liste ne garde QUE les
+        collisions tombées sur les cases d'un mot (le mot en question)."""
         ts = datetime.datetime.now().isoformat(timespec="milliseconds")
         self.collision_count += 1
         self.explosions.append(ExplosionAnimation(self.sprites, mid_px,
                                                   self.cfg["explosion_scale"],
                                                   self.cfg["explosion_fps"]))
-        self.collision_events.append((cell + (f"  {word}" if word else ""), ts[11:19]))
+        if word:
+            self.collision_events.append((f"{word}  ({cell})", ts[11:19]))
+            self.root.after(0, self._refresh_events)
         if self.log:
             self.log.writerow([ts, "Roumba A", "Roumba B", cell, word or ""])
             self.log_file.flush()
-        self.root.after(0, self._refresh_events)
         print(f"💥 BOOM n°{self.collision_count} — case {cell}" + (f" (mot: {word})" if word else ""))
 
     # ================= sorties =================
