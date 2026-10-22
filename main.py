@@ -42,6 +42,57 @@ VIDEO_W = 960
 VIDEO_H = 540
 
 
+def draw_grid_on_view(view, mapper, cols, rows):
+    """Dessine la grille (lignes + lettres + chiffres) sur la vue caméra
+    en projetant les coordonnées grille vers les pixels via l'homographie inverse."""
+    # lignes verticales (séparateurs de colonnes) + lettres en haut de chaque colonne
+    for i in range(cols + 1):
+        u = i / cols
+        p0 = mapper.to_pixels(u, 0.0)
+        p1 = mapper.to_pixels(u, 1.0)
+        cv2.line(view, (int(p0[0]), int(p0[1])), (int(p1[0]), int(p1[1])),
+                 (255, 255, 255), 1, cv2.LINE_AA)
+        if i < cols:
+            center = mapper.to_pixels(u + 0.5 / cols, 0.5 / rows)
+            cv2.putText(view, LETTERS[i],
+                        (int(center[0]) - 6, int(center[1]) + 6),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+    # lignes horizontales (séparateurs de lignes) + chiffres à gauche de chaque ligne
+    for j in range(rows + 1):
+        v = j / rows
+        p0 = mapper.to_pixels(0.0, v)
+        p1 = mapper.to_pixels(1.0, v)
+        cv2.line(view, (int(p0[0]), int(p0[1])), (int(p1[0]), int(p1[1])),
+                 (255, 255, 255), 1, cv2.LINE_AA)
+        if j < rows:
+            center = mapper.to_pixels(0.5 / cols, v + 0.5 / rows)
+            cv2.putText(view, str(j + 1),
+                        (int(center[0]) - 6, int(center[1]) + 6),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+
+
+def draw_words_on_view(view, mapper, cols, rows, words):
+    """Dessine chaque mot lettre par lettre dans ses cases (H ou V)."""
+    import re
+    for word, start, direction in words:
+        sm = re.match(r"^([A-Z])(\d+)$", str(start).upper())
+        if not sm:
+            continue
+        sc = ord(sm.group(1)) - ord("A")
+        sr = int(sm.group(2)) - 1
+        letters = list(str(word).replace(" ", "").upper())
+        for k, letter in enumerate(letters):
+            if str(direction).upper() == "H":
+                c, r = sc + k, sr
+            else:
+                c, r = sc, sr + k
+            if c >= cols or r >= rows:
+                break
+            px = mapper.to_pixels((c + 0.5) / cols, (r + 0.5) / rows)
+            cv2.putText(view, letter, (int(px[0]) - 10, int(px[1]) + 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (120, 220, 255), 2, cv2.LINE_AA)
+
+
 def word_for_cell(cell, words):
     import re
     m = re.match(r"^([A-Z])(\d+)$", cell)
@@ -114,11 +165,18 @@ class ExplosionAnimation:
 class GridMapper:
     def __init__(self, H):
         self.H = np.array(H, dtype=np.float32)
+        self.Hinv = np.linalg.inv(self.H)  # unités grille [0..1] -> pixels
 
     def to_grid(self, pt, cols, rows):
         p = np.array([[pt]], dtype=np.float32)
         g = cv2.perspectiveTransform(p, self.H)[0][0]
         return g[0] * cols, g[1] * rows
+
+    def to_pixels(self, gu, gv):
+        """coordonnées grille normalisées [0..1] -> pixels caméra"""
+        p = np.array([[[gu, gv]]], dtype=np.float32)
+        q = cv2.perspectiveTransform(p, self.Hinv)[0][0]
+        return float(q[0]), float(q[1])
 
     def warped(self, frame, cols, rows):
         w, h = 800, 800
@@ -138,6 +196,8 @@ class App:
         self.words = [tuple(w) for w in self.cfg["words"]]
         self.corner_pts = []
         self.calib_mode = False
+        self.show_grid = True
+        self.show_words = True
         self.explosions = []
         self.collision_events = []  # [(cell, ts)]
         self.last_collision_t = -999.0
@@ -212,6 +272,13 @@ class App:
         self.word_list = tk.Listbox(w, height=5)
         self.word_list.pack(fill=tk.X, pady=4)
         ttk.Button(w, text="Supprimer le mot sélectionné", command=self._remove_word).pack(fill=tk.X)
+        vis = ttk.Frame(w); vis.pack(fill=tk.X, pady=(4, 0))
+        self.show_words_var = tk.BooleanVar(value=self.show_words)
+        ttk.Checkbutton(vis, text="Afficher les mots sur la grille", variable=self.show_words_var,
+                        command=lambda: self._set_show("words")).pack(side=tk.LEFT)
+        self.show_grid_var = tk.BooleanVar(value=self.show_grid)
+        ttk.Checkbutton(vis, text="Afficher la grille", variable=self.show_grid_var,
+                        command=lambda: self._set_show("grid")).pack(side=tk.LEFT, padx=6)
 
         # --- Explosion ---
         e = ttk.LabelFrame(right, text="Explosion 💥", padding=8)
@@ -255,6 +322,12 @@ class App:
         self._refresh_events()
 
     # ================= config live =================
+    def _set_show(self, what):
+        if what == "words":
+            self.show_words = bool(self.show_words_var.get())
+        else:
+            self.show_grid = bool(self.show_grid_var.get())
+
     def _apply_grid(self):
         self._apply_cfg("cols", int(self.cols_var.get()))
         self._apply_cfg("rows", int(self.rows_var.get()))
@@ -432,6 +505,13 @@ class App:
 
     def _process(self, frame):
         view = frame.copy()
+        # grille + mots dessinés PAR-DESSUS la vidéo (calibrés sur les 4 coins)
+        if self.mapper:
+            cols, rows = self.cfg["cols"], self.cfg["rows"]
+            if self.show_grid:
+                draw_grid_on_view(view, self.mapper, cols, rows)
+            if self.show_words:
+                draw_words_on_view(view, self.mapper, cols, rows, self.words)
         detections = aruco_detect.detect(frame)
         posA = detections.get(self.cfg[ROBOT_A["id_key"]])
         posB = detections.get(self.cfg[ROBOT_B["id_key"]])
