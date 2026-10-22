@@ -9,7 +9,10 @@ pip install -r requirements.txt
 python make_markers.py
 ```
 
-
+**Obtenir les markers ArUco
+```bash
+python make_markers.py
+```
 
 
 
