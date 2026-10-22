@@ -1,4 +1,20 @@
-# 🤖💥 Ouija des Roumbas
+# Ouija des Roumbas
+
+
+**Lancement**
+git clone https://github.com/Massicotte/ouija_des_roombas.git
+cd ouija_des_roombas
+pip install -r requirements.txt
+python make_markers.py
+
+
+
+
+
+
+
+
+
 
 **UNE seule commande, UNE seule fenêtre** : la vidéo en direct à gauche, tous les
 réglages à droite qui agissent **immédiatement** (calibration, mots, explosion,
