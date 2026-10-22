@@ -153,9 +153,15 @@ class App:
 
         self._build_ui()
         self._open_outputs()
-        self._start_camera()
         self._sync_writer()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        # la caméra s'ouvre en ARRIÈRE-PLAN : la fenêtre s'affiche immédiatement,
+        # avec un statut visible pendant l'ouverture (qui peut être lente sous Windows)
+        self.cap = None
+        self.latest_frame = None
+        self.camera_error = None
+        threading.Thread(target=self._open_camera, daemon=True).start()
+        self.root.after(10, self._display_loop)
 
     # ================= UI =================
     def _build_ui(self):
@@ -355,34 +361,63 @@ class App:
         if not log_exists:
             self.log.writerow(["timestamp", "robot_a", "robot_b", "cellule", "mot"])
 
-    def _start_camera(self):
-        self.cap = cv2.VideoCapture(self.cfg["cam_index"])
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cfg["cam_width"])
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cfg["cam_height"])
-        ok, frame = self.cap.read()
-        if not ok:
-            raise SystemExit("Pas de caméra trouvée, vérifie cam_index dans la config !")
-        self.frame_h, self.frame_w = frame.shape[:2]
-        self.thread = threading.Thread(target=self._capture_loop, daemon=True)
-        self.thread.start()
-        self.root.after(10, self._display_loop)
-
-    def _capture_loop(self):
-        while self.running:
-            ok, frame = self.cap.read()
-            if not ok:
-                time.sleep(0.01)
-                continue
+    def _open_camera(self):
+        """Thread séparé : ouvre la caméra sans bloquer l'interface.
+        Sous Windows, cv2.VideoCapture peut mettre plusieurs secondes
+        (voire échouer silencieusement) — d'où le backend DirectShow + timeout."""
+        try:
+            import sys
+            cap = cv2.VideoCapture(self.cfg["cam_index"], cv2.CAP_DSHOW) \
+                if sys.platform == "win32" else cv2.VideoCapture(self.cfg["cam_index"])
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                # 2e tentative sans backend spécifique (webcam virtuelle, etc.)
+                cap.release()
+                cap = cv2.VideoCapture(self.cfg["cam_index"])
+                ok, frame = cap.read()
+            if not ok or frame is None:
+                self.camera_error = ("Caméra introuvable. Vérifie qu'elle est branchée et "
+                                      "autorisée (Confidentialité Windows > Caméra), "
+                                      "ou change cam_index dans grid_config.json.")
+                self.hint.set(self.camera_error)
+                return
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cfg["cam_width"])
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cfg["cam_height"])
+            self.frame_h, self.frame_w = frame.shape[:2]
             with self.lock:
-                self.latest_frame = frame
-        self.cap.release()
+                self.cap = cap
+            self.hint.set("Caméra prête ✔ — clique '📍 Calibrer les 4 coins' pour commencer")
+            while self.running:
+                ok, frame = cap.read()
+                if not ok:
+                    time.sleep(0.01)
+                    continue
+                with self.lock:
+                    self.latest_frame = frame
+            cap.release()
+        except Exception as e:
+            self.camera_error = f"Erreur caméra : {e}"
+            self.hint.set(self.camera_error)
 
     # ================= boucle d'affichage =================
     def _display_loop(self):
         if not self.running:
             return
         frame = getattr(self, "latest_frame", None)
-        if frame is not None:
+        if frame is None:
+            # caméra pas encore prête (ou en erreur) : écran d'attente
+            waiting = np.full((VIDEO_H, VIDEO_W, 3), (30, 30, 30), np.uint8)
+            msg = self.camera_error or "Ouverture de la caméra..."
+            cv2.putText(waiting, msg[:60], (20, VIDEO_H // 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+            ok_buf, buf = cv2.imencode(".ppm", waiting)
+            if ok_buf:
+                self._photo = tk.PhotoImage(data=buf.tobytes())
+                self.canvas.delete("all")
+                self.canvas.create_image(0, 0, anchor="nw", image=self._photo)
+        else:
+            if self.writer is None and self.cfg["record"]:
+                self._sync_writer()  # caméra prête -> on connaît la taille des frames
             view = self._process(frame)
             with self.lock:
                 if self.writer:
@@ -438,18 +473,20 @@ class App:
         return view
 
     # ================= writer =================
-    def _sync_writer(self):
-        with self.lock:
-            if self.cfg["record"] and self.writer is None:
+    def _sync_writer(self, start=False):
+        """Le writer vidéo attend que la caméra fournisse la taille réelle des frames."""
+        if not self.cfg["record"] and self.writer is not None:
+            with self.lock:
+                self.writer.release()
+                self.writer = None
+            return
+        if self.cfg["record"] and self.writer is None and self.cap is not None:
+            with self.lock:
                 stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                 path = f"{self.cfg['record_dir']}/session_{stamp}.mp4"
                 self.writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"),
                                               25.0, (self.frame_w, self.frame_h))
                 self.hint.set(f"Enregistrement : {path}")
-            elif not self.cfg["record"] and self.writer is not None:
-                self.writer.release()
-                self.writer = None
-                self.hint.set("Enregistrement arrêté")
 
     # ================= fermeture =================
     def _on_close(self):
