@@ -1,0 +1,4 @@
+__pycache__/
+grid_config.json
+captures/
+collisions.csv
