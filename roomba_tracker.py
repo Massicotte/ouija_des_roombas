@@ -1,17 +1,17 @@
 """
-ROOOMBA TRACKER 🤖💥 — Ouija des Roumbas
-Caméra fixe au-dessus d'une grille -> track 2 robots par leur forme
-(disques sombres : seuillage + circularité), détecte les collisions,
-affiche une explosion, enregistre la vidéo + un log CSV des impacts.
-Un panneau en haut à droite affiche les cases/mots où il y a eu collision,
-avec un bouton "Reset".
+ROOOMBA TRACKER 🤖💥 — Ouija des Roumbas (ArUco)
+Caméra fixe au-dessus d'une grille -> track 2 Roombas par leurs marqueurs ArUco,
+détecte les collisions, joue l'animation d'explosion (sprites pixel-art) EXACTEMENT
+au point de collision, enregistre la vidéo + un CSV des impacts.
+Panneau en haut à droite : liste des cases/mots touchés (reset avec 'r').
 
 Install:
     pip install -r requirements.txt
 
 Usage:
-    python calibrate.py       # 1) régler grille + mots + coins (fenêtre dédiée)
-    python roomba_tracker.py  # 2) tracking
+    python make_markers.py     # 1) imprimer les 2 marqueurs ArUco
+    python calibrate.py       # 2) grille + mots + coins + taille d'explosion
+    python roomba_tracker.py  # 3) tracking
 """
 
 import csv
@@ -23,6 +23,7 @@ import cv2
 import numpy as np
 
 from config import load_config, cell_name, LETTERS
+import aruco_detect
 
 CFG = load_config()
 
@@ -30,30 +31,84 @@ ROBOT_A = {"name": "Roumba A", "draw": (60, 60, 230)}
 ROBOT_B = {"name": "Roumba B", "draw": (230, 120, 40)}
 ROBOTS = [ROBOT_A, ROBOT_B]
 
-# ---------- panneau latéral (1/8e d'écran à droite) ----------
-PANEL_FRACTION = 1 / 8          # largeur du panneau = 1/8 de la frame
+PANEL_FRACTION = 1 / 8
 PANEL_BG = (25, 25, 25)
 PANEL_TEXT = (255, 255, 255)
 MAX_WORDS_SHOWN = 40
 
 
-class WordPanel:
-    """Panneau dessiné SUR la frame (donc inclus dans l'enregistrement vidéo)."""
+# ============================================================
+# ANIMATION D'EXPLOSION : sprites (pixel-art) au point de collision
+# ============================================================
+class ExplosionAnimation:
+    """Joue les frames du sprite-sheet, centrées sur le point de collision.
+    `scale` (réglé dans calibrate.py) contrôle la taille de l'explosion."""
 
+    def __init__(self, sprites, pos, scale, fps):
+        self.frames = sprites        # liste de frames RGBA (np.uint8)
+        self.pos = (int(pos[0]), int(pos[1]))
+        self.scale = scale
+        self.t0 = time.time()
+        self.frame_dur = 1.0 / fps
+
+    def alive(self):
+        return self._idx() < len(self.frames)
+
+    def _idx(self):
+        return int((time.time() - self.t0) / self.frame_dur)
+
+    def draw(self, img):
+        idx = self._idx()
+        if idx >= len(self.frames):
+            return
+        spr = self.frames[idx]
+        h, w = spr.shape[:2]
+        # le sprite fait ~137px de base ; scale=1.0 -> ~un tiers de case visible
+        size = max(8, int(w * self.scale))
+        spr = cv2.resize(spr, (size, size), interpolation=cv2.INTER_NEAREST)
+        x, y = self.pos[0] - size // 2, self.pos[1] - size // 2
+        h2, w2 = spr.shape[:2]
+        x0, y0 = max(0, x), max(0, y)
+        x1, y1 = min(img.shape[1], x + w2), min(img.shape[0], y + h2)
+        if x1 <= x0 or y1 <= y0:
+            return
+        region = img[y0:y1, x0:x1]
+        sub = spr[y0 - y:y0 - y + (y1 - y0), x0 - x:x0 - x + (x1 - x0)]
+        alpha = sub[:, :, 3:4].astype(np.float32) / 255.0
+        img[y0:y1, x0:x1] = (sub[:, :, :3] * alpha + region * (1 - alpha)).astype(np.uint8)
+
+
+def load_sprites(path):
+    """Charge le sprite-sheet et découpe en frames BGRA."""
+    sheet = cv2.imread(str(Path(__file__).parent / path), cv2.IMREAD_UNCHANGED)
+    if sheet is None:
+        raise SystemExit(f"Sprite sheet introuvable : {path}")
+    if sheet.ndim == 2:
+        sheet = cv2.cvtColor(sheet, cv2.COLOR_GRAY2BGRA)
+    elif sheet.shape[2] == 3:
+        sheet = cv2.cvtColor(sheet, cv2.COLOR_BGR2BGRA)
+    h = sheet.shape[0]
+    n = sheet.shape[1] // h  # frames carrées côte à côte
+    frames = [sheet[:, i * h:(i + 1) * h] for i in range(n)]
+    return frames
+
+
+# ============================================================
+# PANNEAU LATÉRAL
+# ============================================================
+class WordPanel:
     def __init__(self, frame_w, frame_h):
         self.w = max(200, int(frame_w * PANEL_FRACTION))
         self.h = frame_h
-        self.words = []      # [(cell, timestamp_str)]
-        self.dirty = True
+        self.words = []
+        self.reset_btn = None
 
     def add(self, cell, ts):
         self.words.append((cell, ts))
         self.words = self.words[-MAX_WORDS_SHOWN:]
-        self.dirty = True
 
     def reset(self):
         self.words.clear()
-        self.dirty = True
 
     def draw(self, img):
         cv2.rectangle(img, (img.shape[1] - self.w, 0), (img.shape[1], self.h), PANEL_BG, -1)
@@ -70,7 +125,6 @@ class WordPanel:
             y += 22
             if y > self.h - 60:
                 break
-        # bouton reset (zone cliquable, gérée dans main)
         self.reset_btn = (img.shape[1] - self.w + 10, self.h - 40,
                           img.shape[1] - 10, self.h - 10)
         cv2.rectangle(img, (self.reset_btn[0], self.reset_btn[1]),
@@ -78,80 +132,6 @@ class WordPanel:
         cv2.putText(img, "RESET (touche R)", (self.reset_btn[0] + 8, self.reset_btn[1] + 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, PANEL_TEXT, 1)
         return img
-
-
-# ============================================================
-# TRACKING PAR LA FORME : seuil -> contours -> blobs ronds
-# ============================================================
-def find_robots_by_shape(gray):
-    if CFG["dark_on_light"]:
-        _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    else:
-        _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    th = cv2.morphologyEx(th, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
-    contours, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    found = []
-    for c in contours:
-        area = cv2.contourArea(c)
-        if not (CFG["min_area"] < area < CFG["max_area"]):
-            continue
-        perim = cv2.arcLength(c, True)
-        if perim == 0:
-            continue
-        circularity = 4 * np.pi * area / (perim * perim)
-        if circularity < CFG["min_circularity"]:
-            continue
-        M = cv2.moments(c)
-        if M["m00"] == 0:
-            continue
-        found.append((int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"]), area))
-    found.sort(key=lambda f: f[2], reverse=True)
-    return found[:2]
-
-
-def assign_identities(detections, prev):
-    assigned = {}
-    remaining = list(detections)
-    for name, p in prev.items():
-        if not remaining:
-            break
-        i = min(range(len(remaining)),
-                key=lambda k: np.hypot(remaining[k][0] - p[0], remaining[k][1] - p[1]))
-        assigned[name] = (remaining[i][0], remaining[i][1])
-        remaining.pop(i)
-    for robot in ROBOTS:
-        if robot["name"] not in assigned and remaining:
-            x, y, _ = remaining.pop(0)
-            assigned[robot["name"]] = (x, y)
-    return assigned
-
-
-# ============================================================
-# EXPLOSION : particules
-# ============================================================
-class Explosion:
-    def __init__(self, pos_px):
-        self.t0 = time.time()
-        self.pos = pos_px
-        rng = np.random.default_rng()
-        angles = rng.uniform(0, 2 * np.pi, CFG["n_particles"])
-        speeds = rng.uniform(40, 160, CFG["n_particles"])
-        colors = rng.uniform(0, 255, (CFG["n_particles"], 3)).tolist()
-        self.particles = list(zip(angles.tolist(), speeds.tolist(), colors))
-        self.duration = CFG["explosion_duration_s"]
-
-    def alive(self):
-        return time.time() - self.t0 < self.duration
-
-    def draw(self, img):
-        k = (time.time() - self.t0) / self.duration
-        for ang, spd, col in self.particles:
-            r = spd * k
-            x = int(self.pos[0] + r * np.cos(ang))
-            y = int(self.pos[1] + r * np.sin(ang))
-            size = max(1, int(8 * (1 - k)))
-            cv2.circle(img, (x, y), size, tuple(int(c) for c in col), -1)
-        cv2.circle(img, self.pos, int(30 * (1 - k)) + 4, (0, 0, 255), 2)
 
 
 # ============================================================
@@ -188,7 +168,6 @@ def draw_grid_overlay(img):
 
 
 def word_for_cell(cell):
-    """Renvoie le mot qui couvre la case `cell`, ou None."""
     import re
     m = re.match(r"^([A-Z])(\d+)$", cell)
     if not m:
@@ -226,6 +205,7 @@ def main():
 
     mapper = GridMapper(CFG["homography"])
     panel = WordPanel(frame.shape[1], frame.shape[0])
+    sprites = load_sprites(CFG["explosion_sprites"])
 
     win = "RoombaTracker"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
@@ -244,12 +224,12 @@ def main():
     events_file = open(events_path, "a", newline="")
     log = csv.writer(events_file)
     if not log_exists:
-        log.writerow(["timestamp", "cellule", "col", "row", "mot"])
+        log.writerow(["timestamp", "robot_a", "robot_b", "cellule", "col", "row", "mot"])
 
     explosions = []
     last_collision_t = -999.0
     collision_count = 0
-    prev_positions = {}
+    missing_frames = 0
 
     print("Tracking lancé. 'r' = reset liste des mots, 'q' = quitter")
 
@@ -259,19 +239,28 @@ def main():
             break
         view = frame.copy()
 
-        detections = find_robots_by_shape(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
-        positions = assign_identities(detections, prev_positions)
-        prev_positions.update(positions)
-        for robot in ROBOTS:
-            if robot["name"] in positions:
-                px = positions[robot["name"]]
-                cv2.circle(view, px, 12, robot["draw"], 3)
-                cv2.putText(view, robot["name"], (px[0] + 14, px[1] - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, robot["draw"], 2)
+        # --- détection ArUco (uniquement les 2 marqueurs A et B) ---
+        detections = aruco_detect.detect(frame)
+        posA = detections.get(aruco_detect.ROBOT_A_ID)
+        posB = detections.get(aruco_detect.ROBOT_B_ID)
+        if posA:
+            cv2.circle(view, (int(posA[0]), int(posA[1])), 12, ROBOT_A["draw"], 3)
+            cv2.putText(view, ROBOT_A["name"], (int(posA[0]) + 14, int(posA[1]) - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, ROBOT_A["draw"], 2)
+        if posB:
+            cv2.circle(view, (int(posB[0]), int(posB[1])), 12, ROBOT_B["draw"], 3)
+            cv2.putText(view, ROBOT_B["name"], (int(posB[0]) + 14, int(posB[1]) - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, ROBOT_B["draw"], 2)
+        if not (posA and posB):
+            missing_frames += 1
+            if missing_frames == 30:
+                print("⚠ Les 2 marqueurs ArUco ne sont pas visibles ensemble.")
+        else:
+            missing_frames = 0
 
-        if len(positions) == 2:
-            gA = mapper.to_grid(positions["Roumba A"])
-            gB = mapper.to_grid(positions["Roumba B"])
+        if posA and posB:
+            gA = mapper.to_grid((posA[0], posA[1]))
+            gB = mapper.to_grid((posB[0], posB[1]))
 
             warped = mapper.warped(frame)
             draw_grid_overlay(warped)
@@ -282,24 +271,24 @@ def main():
             if dist < CFG["collision_dist_cells"] and now - last_collision_t > CFG["collision_cooldown_s"]:
                 last_collision_t = now
                 collision_count += 1
+                # explosion EXACTEMENT au point médian entre les 2 marqueurs
+                mid_px = ((posA[0] + posB[0]) / 2, (posA[1] + posB[1]) / 2)
                 mid = ((gA[0] + gB[0]) / 2, (gA[1] + gB[1]) / 2)
                 cell = cell_name(mid[0], mid[1], CFG["cols"], CFG["rows"])
                 word = word_for_cell(cell)
-                mid_px = (int((positions["Roumba A"][0] + positions["Roumba B"][0]) / 2),
-                          int((positions["Roumba A"][1] + positions["Roumba B"][1]) / 2))
-                explosions.append(Explosion(mid_px))
+                explosions.append(ExplosionAnimation(sprites, mid_px,
+                                                    CFG["explosion_scale"],
+                                                    CFG["explosion_fps"]))
                 ts = datetime.datetime.now().isoformat(timespec="milliseconds")
-                log.writerow([ts, cell, round(mid[0], 2), round(mid[1], 2), word or ""])
+                log.writerow([ts, "Roumba A", "Roumba B", cell,
+                              round(mid[0], 2), round(mid[1], 2), word or ""])
                 events_file.flush()
-                label = f"case {cell}" + (f" (mot: {word})" if word else "")
                 panel.add(cell + (f"  {word}" if word else ""), ts[11:19])
-                print(f"💥 BOOM n°{collision_count} — {label}")
+                print(f"💥 BOOM n°{collision_count} — case {cell}" + (f" (mot: {word})" if word else ""))
 
-            for i, robot in enumerate(ROBOTS):
-                if robot["name"] in positions:
-                    col, row = mapper.to_grid(positions[robot["name"]])
-                    cv2.putText(view, f"{robot['name']} -> {cell_name(col, row, CFG['cols'], CFG['rows'])}",
-                                (10, 60 + 25 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.7, robot["draw"], 2)
+            for i, (robot, g) in enumerate([(ROBOT_A, gA), (ROBOT_B, gB)]):
+                cv2.putText(view, f"{robot['name']} -> {cell_name(g[0], g[1], CFG['cols'], CFG['rows'])}",
+                            (10, 60 + 25 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.7, robot["draw"], 2)
 
         explosions = [e for e in explosions if e.alive()]
         for e in explosions:

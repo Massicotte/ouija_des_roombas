@@ -1,24 +1,25 @@
 """
 OUTIL DE CALIBRATION 🔧
 Fenêtre séparée pour tout régler SANS toucher au code :
-  - nombre de colonnes / lignes de la grille
-  - les mots placés dans la grille (+ leur case de départ et direction)
+  - colonnes / lignes de la grille
+  - les mots placés dans la grille (mot + case de départ + direction)
   - les 4 coins de la grille (clics sur un aperçu caméra) -> homographie
+  - la TAILLE DE L'EXPLOSION (slider avec aperçu animé)
 
 Usage:
     python calibrate.py
 """
 
-import json
 import tkinter as tk
 from tkinter import ttk, messagebox
 
 import cv2
 import numpy as np
 
-from config import load_config, save_config, CONFIG_FILE
+from config import load_config, save_config
 
 DIRECTIONS = {"H": "Horizontal (vers la droite)", "V": "Vertical (vers le bas)"}
+EXPLOSION_MIN, EXPLOSION_MAX = 0.2, 5.0
 
 
 class CalibrationApp:
@@ -27,8 +28,6 @@ class CalibrationApp:
         self.root.title("Ouija des Roumbas — Calibration de la grille")
         self.cfg = load_config()
         self.corner_pts = []
-        if self.cfg.get("homography"):
-            self.root.after(300, self._try_show_existing)
 
         main = ttk.Frame(root, padding=15)
         main.pack(fill=tk.BOTH, expand=True)
@@ -42,6 +41,19 @@ class CalibrationApp:
         ttk.Label(grid_frame, text="Lignes (chiffres 1..):").grid(row=0, column=2, sticky="w")
         self.rows_var = tk.IntVar(value=self.cfg["rows"])
         ttk.Spinbox(grid_frame, from_=2, to=30, width=5, textvariable=self.rows_var).grid(row=0, column=3, sticky="w", padx=10)
+
+        # --- Explosion ---
+        exp_frame = ttk.LabelFrame(main, text="Taille de l'explosion 💥", padding=10)
+        exp_frame.pack(fill=tk.X, pady=8)
+        self.exp_var = tk.DoubleVar(value=float(self.cfg["explosion_scale"]))
+        self.exp_label = tk.StringVar()
+        self._update_exp_label()
+        slider = ttk.Scale(exp_frame, from_=EXPLOSION_MIN, to=EXPLOSION_MAX,
+                           variable=self.exp_var, command=self._on_exp_slider)
+        slider.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Label(exp_frame, textvariable=self.exp_label, width=12).pack(side=tk.LEFT, padx=8)
+        ttk.Button(exp_frame, text="💥 Aperçu", command=self.preview_explosion).pack(side=tk.LEFT)
+        self._sprites = None
 
         # --- Calibration caméra ---
         cam_frame = ttk.LabelFrame(main, text="Coins de la grille (caméra)", padding=10)
@@ -80,6 +92,36 @@ class CalibrationApp:
         self.words = [tuple(w) for w in self.cfg["words"]]
         self.refresh_words()
 
+    # ---------------- explosion ----------------
+    def _update_exp_label(self, *_):
+        self.exp_label.set(f"x{self.exp_var.get():.1f}")
+
+    def _on_exp_slider(self, *_):
+        self._update_exp_label()
+
+    def preview_explosion(self):
+        """Ouvre une petite fenêtre OpenCV et joue l'explosion animée à la taille choisie."""
+        if self._sprites is None:
+            from roomba_tracker import load_sprites, ExplosionAnimation
+            self._sprites = load_sprites(self.cfg["explosion_sprites"])
+            self._exp_cls = ExplosionAnimation
+        cv2.destroyAllWindows()
+        canvas = np.full((400, 400, 3), (40, 40, 40), np.uint8)
+        cv2.putText(canvas, "'q' pour fermer", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+        anim = self._exp_cls(self._sprites, (200, 200), float(self.exp_var.get()),
+                             self.cfg["explosion_fps"])
+        win = "Apercu explosion"
+        while anim.alive():
+            disp = canvas.copy()
+            anim.draw(disp)
+            cv2.imshow(win, disp)
+            if cv2.waitKey(30) & 0xFF in (ord('q'), 27):
+                break
+        cv2.imshow(win, disp)
+        cv2.waitKey(400)
+        cv2.destroyAllWindows()
+
     # ---------------- words ----------------
     def refresh_words(self):
         self.word_list.delete(0, tk.END)
@@ -113,7 +155,7 @@ class CalibrationApp:
         ok, frame = cap.read()
         if not ok:
             cap.release()
-            messagebox.showerror("Caméra", "Pas de caméra trouvée (vérifie cam_index dans config).")
+            messagebox.showerror("Caméra", "Pas de caméra trouvée (vérifie cam_index dans la config).")
             return
 
         pts = []
@@ -125,7 +167,7 @@ class CalibrationApp:
 
         cv2.namedWindow(win, cv2.WINDOW_NORMAL)
         cv2.setMouseCallback(win, on_click)
-        print("Clique les 4 coins puis appuie sur 's' pour valider, 'r' pour reset, 'q' pour annuler.")
+        print("Clique les 4 coins puis 's' pour valider, 'r' reset, 'q' annuler.")
         while True:
             ok, frame = cap.read()
             if not ok:
@@ -153,13 +195,11 @@ class CalibrationApp:
         cap.release()
         cv2.destroyAllWindows()
 
-    def _try_show_existing(self):
-        pass
-
     # ---------------- save ----------------
     def save_and_close(self):
         self.cfg["cols"] = int(self.cols_var.get())
         self.cfg["rows"] = int(self.rows_var.get())
+        self.cfg["explosion_scale"] = round(float(self.exp_var.get()), 2)
         self.cfg["words"] = [list(w) for w in self.words]
         save_config(self.cfg)
         self.root.destroy()

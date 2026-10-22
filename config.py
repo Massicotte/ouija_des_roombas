@@ -10,12 +10,19 @@ DEFAULTS = {
     "rows": 8,
     "words": [],
     "homography": None,
-    "dark_on_light": True,
-    "min_area": 1200,
-    "max_area": 250000,
-    "min_circularity": 0.6,
+    # --- ArUco ---
+    "aruco_dict": "DICT_4X4_50",
+    "robot_a_id": 0,
+    "robot_b_id": 1,
+    "marker_side_cm": 8.0,
+    # --- collision ---
     "collision_dist_cells": 0.5,
     "collision_cooldown_s": 2.0,
+    # --- explosion ---
+    "explosion_scale": 1.0,
+    "explosion_sprites": "assets/explosion_sprites.png",
+    "explosion_fps": 15,
+    # --- caméra / sortie ---
     "cam_index": 0,
     "cam_width": 1920,
     "cam_height": 1080,
@@ -23,8 +30,6 @@ DEFAULTS = {
     "record": True,
     "record_dir": "captures",
     "events_csv": "collisions.csv",
-    "explosion_duration_s": 0.8,
-    "n_particles": 24,
 }
 
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"

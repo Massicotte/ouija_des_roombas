@@ -12,7 +12,7 @@ Le pipeline complet tient en 4 briques éprouvées d'OpenCV :
 |---|---|---|
 | 1. Grille virtuelle | Calibration : nb de colonnes (lettres) / lignes (chiffres) | trivial |
 | 2. Angle de caméra | **Homographie** (4 coins → `cv2.getPerspectiveTransform`) | très fiable |
-| 3. Tracking des 2 robots | Seuillage Otsu + contours + filtre de circularité → blobs ronds uniquement | fiable si robots sombres sur grille claire |
+| 3. Tracking des 2 robots | **ArUco** (marqueurs imprimés sur les Roombas) → identités A/B garanties, zéro faux positif | très fiable |
 | 4. Collision | Distance entre les 2 centres < seuil (en unités de cases) + cooldown anti-spam | fiable |
 | 5. Explosion | Particules dessinées sur la frame | cosmétique |
 
@@ -31,12 +31,25 @@ pip install -r requirements.txt
 
 ### 1. Calibration (fenêtre dédiée, pour "dumb user")
 
+### 0. Imprimer les marqueurs ArUco (une seule fois)
+
+```bash
+python make_markers.py
+```
+
+Génère `markers/marker_A_id0.png` et `markers/marker_B_id1.png` — imprime-les à la
+taille `marker_side_cm` de la config (8 cm par défaut) et colle-les bien à plat
+sur chaque Roomba. Roumba A = id 0, Roumba B = id 1.
+
+### 1. Calibration (fenêtre dédiée, pour "dumb user")
+
 ```bash
 python calibrate.py
 ```
 
 Interface Tkinter où tu règles SANS toucher au code :
 - **Colonnes / lignes** de la grille (compteur, ex: 8×8 → A..H / 1..8)
+- **Taille de l'explosion 💥** : slider (x0.2 → x5.0) avec bouton d'aperçu animé — l'explosion pixel-art se joue au point exact de collision
 - **Les mots placés dans la grille** : mot + case de départ (ex: `B3`) + direction
   (horizontal/vertical) → le tracker affiche automatiquement le mot quand une
   collision tombe sur une case couverte par un mot
@@ -65,28 +78,25 @@ python roomba_tracker.py
 
 | Clé | Effet |
 |---|---|
-| `dark_on_light` | `true` = robots sombres sur grille claire |
-| `min_area` / `max_area` | aire d'un robot en pixels (à ajuster selon ta caméra) |
-| `min_circularity` | 1.0 = cercle parfait ; 0.6 est un bon défaut |
+| `aruco_dict` / `robot_a_id` / `robot_b_id` | type de marqueur et ids des 2 Roombas |
 | `collision_dist_cells` | distance de collision en unités de cases (0.5 ≈ cases voisines) |
+| `explosion_scale` | taille de l'animation d'explosion (x0.2 → x5.0, réglable dans calibrate.py) |
 | `collision_cooldown_s` | anti-spam : délai minimum entre 2 explosions (secondes) |
 | `cam_index` | 0 = webcam par défaut |
 
 ## Limites connues & astuces
 
-- **Éclairage constant** : Otsu est un seuillage automatique par frame ; un changeur
-  de luminosité brutal peut fausser 1-2 frames (le cooldown limite l'impact).
-- **Ombres portées** : si les ombres des robots sont dures, baisse `min_circularity`
-  ou augmente l'éclairage diffus.
-- **Alternative plus robuste** : colle un marqueur **ArUco** sur chaque Roomba
-  (`cv2.aruco.detectMarkers`) → identités A/B garanties, zéro faux positif. Le
-  suivi par forme est le mode "zéro préparation" ; ArUco est le mode "zéro doute".
+- **Marqueurs bien à plat** : un marqueur gondolé ou très incliné se détecte moins bien. 8 cm de côté est un bon compromis vue de haut.
+- **Si un marqueur est caché** (Roomba sous un obstacle), la collision n'est évaluée que quand les DEUX marqueurs sont visibles — pas de faux positif.
 - Pour de meilleures perfs, la détection tourne sur du grayscale full-frame (~30 fps en 1080p sur un laptop moyen).
 
 ## Structure
 
 ```
-roomba_tracker.py   # tracking + collisions + explosion + panneau + enregistrement
-calibrate.py        # outil de calibration (grille, mots, coins) — fenêtre séparée
+roomba_tracker.py   # tracking ArUco + collisions + explosion sprite + panneau + enregistrement
+calibrate.py        # outil de calibration (grille, mots, coins, taille explosion) — fenêtre séparée
+make_markers.py     # génère les 2 marqueurs ArUco à imprimer
+aruco_detect.py     # détection ArUco des 2 Roombas (uniquement ids A et B)
+assets/             # sprite-sheet de l'animation d'explosion (pixel-art)
 config.py           # config partagée, sauvegardée dans grid_config.json
 ```
