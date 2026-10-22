@@ -1,14 +1,5 @@
 """
-OUIJA DES ROOMBAS 🤖💥 — APPLICATION UNIQUE
-Une seule commande, une seule fenêtre : la vidéo en direct à gauche,
-tous les réglages à droite qui agissent IMMÉDIATEMENT sur le tracking.
-
-  - Panneau "Grille" : colonnes/lignes, boutons pour (re)cliquer les 4 coins
-    (directement sur la vidéo), sauvegarde/rechargement
-  - Panneau "Mots" : ajout/suppression en live, la liste des collisions
-  - Panneau "Explosion 💥" : taille, vitesse, aperçu
-  - Panneau "Collisions" : bouton reset + compteur
-  - Recording vidéo/CSV togglable en live
+OUIJA DES ROOMBAS
 
 Usage:
     python main.py
