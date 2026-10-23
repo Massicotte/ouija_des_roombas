@@ -1,5 +1,9 @@
 """
-Détection des 2 Roombas par marqueurs ArUco
+Détection des 2 Roombas par marqueurs ArUco (identités garanties, zéro faux positif).
+Chaque Roomba porte un marqueur ArUco imprimé et collé dessus :
+  - Roumba A -> id `robot_a_id` (0 par défaut)
+  - Roumba B -> id `robot_b_id` (1 par défaut)
+"""
 
 import cv2
 import numpy as np
