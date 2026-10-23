@@ -614,6 +614,16 @@ class App:
 
 
 if __name__ == "__main__":
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--cam", type=int, default=None,
+                    help="index de la caméra (0, 1, 2... ; défaut: cam_index de la config)")
+    args = ap.parse_args()
+    if args.cam is not None:
+        import config as _config
+        _cfg = _config.load_config()
+        _cfg["cam_index"] = args.cam
+        _config.save_config(_cfg)
     root = tk.Tk()
     App(root)
     root.mainloop()
