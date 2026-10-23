@@ -449,11 +449,12 @@ class App:
             ox, oy = getattr(self, "_disp_offset", (0, 0))
             canvas_w = max(1, self.canvas.winfo_width())
             canvas_h = max(1, self.canvas.winfo_height())
-            if canvas_w < 10:
+            if canvas_w < 10 or canvas_h < 10:  # canvas pas encore rendu
                 canvas_w, canvas_h = VIDEO_W, VIDEO_H
             # taille affichée de l'image (identique au calcul du letterbox)
             scale = min(canvas_w / self.frame_w, canvas_h / self.frame_h)
-            disp_w, disp_h = int(self.frame_w * scale), int(self.frame_h * scale)
+            disp_w = max(1, int(self.frame_w * scale))
+            disp_h = max(1, int(self.frame_h * scale))
             # clic relatif à l'image affichée -> pixels frame réelle
             fx = (event.x - ox) / scale
             fy = (event.y - oy) / scale
@@ -668,7 +669,7 @@ class App:
         if not self.running:
             return
         frame = getattr(self, "latest_frame", None)
-        if frame is None:
+        if frame is None or not isinstance(frame, np.ndarray) or frame.shape[0] < 2 or frame.shape[1] < 2:
             # caméra pas encore prête (ou en erreur) : écran d'attente
             waiting = np.full((VIDEO_H, VIDEO_W, 3), (30, 30, 30), np.uint8)
             msg = self.camera_error or "Ouverture de la caméra..."
@@ -690,10 +691,11 @@ class App:
             # des bandes noires comblent le reste du canvas
             canvas_w = max(1, self.canvas.winfo_width())
             canvas_h = max(1, self.canvas.winfo_height())
-            if canvas_w < 10:  # canvas pas encore dimensionné
+            if canvas_w < 10 or canvas_h < 10:  # canvas pas encore rendu
                 canvas_w, canvas_h = VIDEO_W, VIDEO_H
             scale = min(canvas_w / view.shape[1], canvas_h / view.shape[0])
-            disp_w, disp_h = int(view.shape[1] * scale), int(view.shape[0] * scale)
+            disp_w = max(1, int(view.shape[1] * scale))
+            disp_h = max(1, int(view.shape[0] * scale))
             disp = cv2.resize(view, (disp_w, disp_h))
             self._disp_offset = ((canvas_w - disp_w) // 2, (canvas_h - disp_h) // 2)
             ok_buf, buf = cv2.imencode(".ppm", disp)
