@@ -380,8 +380,10 @@ class App:
         if not self.calib_mode:
             return
         if len(self.corner_pts) < 4:
-            sx = self.cfg["cam_width"] / self.canvas.winfo_width()
-            sy = self.cfg["cam_height"] / self.canvas.winfo_height()
+            # échelle canvas -> pixels RÉELS de la frame caméra (pas la config,
+            # qui peut différer de la résolution réellement délivrée)
+            sx = self.frame_w / self.canvas.winfo_width()
+            sy = self.frame_h / self.canvas.winfo_height()
             self.corner_pts.append((int(event.x * sx), int(event.y * sy)))
         if len(self.corner_pts) == 4:
             src = np.array(self.corner_pts, dtype=np.float32)
