@@ -236,11 +236,11 @@ class App:
         # trajectoires : deque par robot (dessinées derrière chaque Roomba)
         self.trails = {ROBOT_A["name"]: deque(maxlen=TRAJ_LENGTH),
                        ROBOT_B["name"]: deque(maxlen=TRAJ_LENGTH)}
-        # prétraitement HSV (réglable en live) pour améliorer la détection
-        # quand la luminosité ou la saturation de la scène varie
-        self.hsv_boost = True
-        self.sat_gain = 1.0    # multiplie la saturation
-        self.val_gain = 1.0    # multiplie la luminosité (value)
+        # réglage IMAGE (visuel) : saturation / luminosité / contraste de la
+        # vidéo affichée et enregistrée, ajustables en live
+        self.img_sat_gain = float(self.cfg.get("img_sat_gain", 1.0))
+        self.img_val_gain = float(self.cfg.get("img_val_gain", 1.0))
+        self.img_contrast = float(self.cfg.get("img_contrast", 1.0))
 
         self._build_ui()
         self._open_outputs()
@@ -383,6 +383,41 @@ class App:
         ttk.Button(d, text="🧹 Effacer les traces", command=self._clear_trails).grid(
             row=3, column=0, columnspan=3, pady=(6, 0), sticky="we")
         d.columnconfigure(1, weight=1)
+
+        # --- Réglage de l'IMAGE (visuel, en live) ---
+        im = ttk.LabelFrame(right, text="Image 🖼", padding=8)
+        im.pack(fill=tk.X, pady=6)
+        ttk.Label(im, text="Saturation:").grid(row=0, column=0, sticky="w")
+        self.img_sat_var = tk.DoubleVar(value=self.img_sat_gain)
+        self.img_sat_label = tk.StringVar(value=f"x{self.img_sat_gain:.1f}")
+        ttk.Scale(im, from_=0.0, to=3.0, variable=self.img_sat_var,
+                  command=lambda *_: self._apply_img_cfg()).grid(row=0, column=1, sticky="we", padx=6)
+        ttk.Label(im, textvariable=self.img_sat_label, width=4).grid(row=0, column=2)
+        ttk.Label(im, text="Luminosité:").grid(row=1, column=0, sticky="w")
+        self.img_val_var = tk.DoubleVar(value=self.img_val_gain)
+        self.img_val_label = tk.StringVar(value=f"x{self.img_val_gain:.1f}")
+        ttk.Scale(im, from_=0.2, to=2.5, variable=self.img_val_var,
+                  command=lambda *_: self._apply_img_cfg()).grid(row=1, column=1, sticky="we", padx=6)
+        ttk.Label(im, textvariable=self.img_val_label, width=4).grid(row=1, column=2)
+        ttk.Label(im, text="Contraste:").grid(row=2, column=0, sticky="w")
+        self.img_cts_var = tk.DoubleVar(value=self.img_contrast)
+        self.img_cts_label = tk.StringVar(value=f"x{self.img_contrast:.1f}")
+        ttk.Scale(im, from_=0.5, to=2.5, variable=self.img_cts_var,
+                  command=lambda *_: self._apply_img_cfg()).grid(row=2, column=1, sticky="we", padx=6)
+        ttk.Label(im, textvariable=self.img_cts_label, width=4).grid(row=2, column=2)
+        im.columnconfigure(1, weight=1)
+
+    def _apply_img_cfg(self):
+        """Applique instantanément les réglages d'image et les sauvegarde."""
+        self.img_sat_gain = round(self.img_sat_var.get(), 2)
+        self.img_val_gain = round(self.img_val_var.get(), 2)
+        self.img_contrast = round(self.img_cts_var.get(), 2)
+        self.img_sat_label.set(f"x{self.img_sat_gain:.1f}")
+        self.img_val_label.set(f"x{self.img_val_gain:.1f}")
+        self.img_cts_label.set(f"x{self.img_contrast:.1f}")
+        self.cfg["img_sat_gain"] = self.img_sat_gain
+        self.cfg["img_val_gain"] = self.img_val_gain
+        self.cfg["img_contrast"] = self.img_contrast
 
     def _apply_color_cfg(self, key, value):
         self.cfg[key] = int(value)
@@ -708,6 +743,16 @@ class App:
 
     def _process(self, frame):
         view = frame.copy()
+        # réglage IMAGE (saturation/luminosité/contraste) appliqué en direct
+        if (self.img_sat_gain != 1.0 or self.img_val_gain != 1.0
+                or self.img_contrast != 1.0):
+            hsv = cv2.cvtColor(view, cv2.COLOR_BGR2HSV).astype(np.float32)
+            hsv[:, :, 1] = np.clip(hsv[:, :, 1] * self.img_sat_gain, 0, 255)
+            hsv[:, :, 2] = np.clip(hsv[:, :, 2] * self.img_val_gain, 0, 255)
+            view = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+            if self.img_contrast != 1.0:
+                view = np.clip((view.astype(np.float32) - 128) * self.img_contrast + 128,
+                               0, 255).astype(np.uint8)
         # grille + mots dessinés PAR-DESSUS la vidéo (calibrés sur les 4 coins)
         if self.mapper:
             cols, rows = self.cfg["cols"], self.cfg["rows"]
