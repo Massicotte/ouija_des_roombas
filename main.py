@@ -228,6 +228,7 @@ class App:
         self.camera_error = None
         self.camera_running = True
         self._available_cams = []
+        self._disp_offset = (0, 0)
 
         self._build_ui()
         self._open_outputs()
@@ -387,21 +388,41 @@ class App:
         self.hint.set("CALIBRATION : clique les 4 coins sur la vidéo (haut-gauche → haut-droit → bas-droit → bas-gauche)")
 
     def _on_video_click(self, event):
+        """Pose un point de calibration là OÙ L'UTILISATRICE CLIQUE, dans
+        n'importe quel ordre (les coins sont ré-orientés automatiquement
+        au 4e clic). Conversion : clic canvas -> pixels réels de la frame."""
         if not self.calib_mode:
             return
         if len(self.corner_pts) < 4:
-            # échelle canvas -> pixels RÉELS de la frame caméra (pas la config,
-            # qui peut différer de la résolution réellement délivrée)
-            sx = self.frame_w / self.canvas.winfo_width()
-            sy = self.frame_h / self.canvas.winfo_height()
-            self.corner_pts.append((int(event.x * sx), int(event.y * sy)))
+            # tenir compte du letterbox : l'image ne remplit pas tout le canvas
+            ox, oy = getattr(self, "_disp_offset", (0, 0))
+            canvas_w = max(1, self.canvas.winfo_width())
+            canvas_h = max(1, self.canvas.winfo_height())
+            if canvas_w < 10:
+                canvas_w, canvas_h = VIDEO_W, VIDEO_H
+            # taille affichée de l'image (identique au calcul du letterbox)
+            scale = min(canvas_w / self.frame_w, canvas_h / self.frame_h)
+            disp_w, disp_h = int(self.frame_w * scale), int(self.frame_h * scale)
+            # clic relatif à l'image affichée -> pixels frame réelle
+            fx = (event.x - ox) / scale
+            fy = (event.y - oy) / scale
+            fx = max(0, min(self.frame_w - 1, fx))
+            fy = max(0, min(self.frame_h - 1, fy))
+            self.corner_pts.append((int(fx), int(fy)))
         if len(self.corner_pts) == 4:
-            src = np.array(self.corner_pts, dtype=np.float32)
+            # ré-orientation automatique : peu importe l'ordre des clics,
+            # on classe les points en haut-gauche / haut-droit / bas-droit / bas-gauche
+            pts = np.array(self.corner_pts, dtype=np.float32)
+            cx, cy = pts[:, 0].mean(), pts[:, 1].mean()
+            ordered = sorted(pts.tolist(), key=lambda p: (p[1] > cy, p[0] > cx))
+            # sorted donne : HG, HD, BG, BD -> réordonner en HG, HD, BD, BG
+            src = np.array([ordered[0], ordered[1], ordered[3], ordered[2]], dtype=np.float32)
             dst = np.array([[0, 0], [1, 0], [1, 1], [0, 1]], dtype=np.float32)
             self.cfg["homography"] = cv2.getPerspectiveTransform(src, dst).tolist()
             self.mapper = GridMapper(self.cfg["homography"])
             self.calib_status.set("Homographie : calibrée ✔")
             self.calib_mode = False
+            self.corner_pts = [(int(p[0]), int(p[1])) for p in src.tolist()]  # points ré-orientés pour l'affichage
             self._save_cfg()
             self.hint.set("Grille calibrée ✔ — tracking actif")
 
@@ -566,15 +587,24 @@ class App:
                 return
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cfg["cam_width"])
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cfg["cam_height"])
+            # relire une frame APRÈS le changement de résolution : la première
+            # frame était dans la résolution par défaut, pas celle demandée
+            ok2, frame2 = cap.read()
+            if ok2 and frame2 is not None:
+                frame = frame2
             self.frame_h, self.frame_w = frame.shape[:2]
             with self.lock:
                 self.cap = cap
+                self.latest_frame = frame
             self.hint.set(f"Caméra {self.cfg['cam_index']} prête ✔")
             while self.camera_running:
                 ok, frame = cap.read()
                 if not ok:
                     time.sleep(0.01)
                     continue
+                # la résolution peut changer en cours de route : la mesurer en continu
+                if frame.shape[1] != self.frame_w or frame.shape[0] != self.frame_h:
+                    self.frame_h, self.frame_w = frame.shape[:2]
                 with self.lock:
                     self.latest_frame = frame
             cap.release()
@@ -605,12 +635,22 @@ class App:
             with self.lock:
                 if self.writer:
                     self.writer.write(view)
-            disp = cv2.resize(view, (VIDEO_W, VIDEO_H))
+            # affichage SANS déformation (letterbox) : la frame garde son ratio,
+            # des bandes noires comblent le reste du canvas
+            canvas_w = max(1, self.canvas.winfo_width())
+            canvas_h = max(1, self.canvas.winfo_height())
+            if canvas_w < 10:  # canvas pas encore dimensionné
+                canvas_w, canvas_h = VIDEO_W, VIDEO_H
+            scale = min(canvas_w / view.shape[1], canvas_h / view.shape[0])
+            disp_w, disp_h = int(view.shape[1] * scale), int(view.shape[0] * scale)
+            disp = cv2.resize(view, (disp_w, disp_h))
+            self._disp_offset = ((canvas_w - disp_w) // 2, (canvas_h - disp_h) // 2)
             ok_buf, buf = cv2.imencode(".ppm", disp)
             if ok_buf:
                 self._photo = tk.PhotoImage(data=buf.tobytes())
                 self.canvas.delete("all")
-                self.canvas.create_image(0, 0, anchor="nw", image=self._photo)
+                self.canvas.create_image(self._disp_offset[0], self._disp_offset[1],
+                                         anchor="nw", image=self._photo)
         self.root.after(10, self._display_loop)
 
     def _process(self, frame):
