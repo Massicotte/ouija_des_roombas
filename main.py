@@ -226,6 +226,8 @@ class App:
         self.cap = None
         self.latest_frame = None
         self.camera_error = None
+        self.camera_running = True
+        self._available_cams = []
 
         self._build_ui()
         self._open_outputs()
@@ -318,6 +320,14 @@ class App:
         # --- Réglages divers ---
         s = ttk.LabelFrame(right, text="Réglages", padding=8)
         s.pack(fill=tk.X, pady=6)
+        ttk.Label(s, text="Source vidéo:").pack(anchor="w")
+        cam_row = ttk.Frame(s); cam_row.pack(fill=tk.X, pady=(2, 4))
+        self.cam_combo = ttk.Combobox(cam_row, state="readonly", width=14)
+        self.cam_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.cam_combo.bind("<<ComboboxSelected>>", self._switch_camera)
+        ttk.Button(cam_row, text="⟳", width=3,
+                   command=self._refresh_cam_list).pack(side=tk.LEFT, padx=3)
+        self._refresh_cam_list()
         self.rec_var = tk.BooleanVar(value=self.cfg["record"])
         ttk.Checkbutton(s, text="Enregistrer la vidéo", variable=self.rec_var,
                         command=lambda: self._apply_cfg("record", self.rec_var.get())).pack(anchor="w")
@@ -470,10 +480,75 @@ class App:
         if not log_exists:
             self.log.writerow(["timestamp", "robot_a", "robot_b", "cellule", "mot"])
 
+    def _probe_cameras(self):
+        """Sonde les index 0..3 en arrière-plan pour lister les sources disponibles."""
+        import sys
+        found = []
+        for i in range(4):
+            try:
+                cap = cv2.VideoCapture(i, cv2.CAP_DSHOW) if sys.platform == "win32" \
+                    else cv2.VideoCapture(i)
+                ok, frame = cap.read()
+                cap.release()
+                if ok and frame is not None:
+                    found.append(i)
+            except Exception:
+                continue
+        return found
+
+    def _refresh_cam_list(self):
+        """Sonde les caméras dans un thread et met à jour la liste déroulante."""
+        self.cam_combo['values'] = ['(scan en cours...)']
+        self.cam_combo.set('(scan en cours...)')
+        def work():
+            cams = self._probe_cameras()
+            labels = [f"Caméra {i}" + ("  (actuelle)" if i == self.cfg["cam_index"] else "")
+                      for i in cams]
+            self.root.after(0, lambda: self._update_cam_combo(cams, labels))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_cam_combo(self, cams, labels):
+        self._available_cams = cams
+        self.cam_combo['values'] = labels or ['(aucune caméra trouvée)']
+        if self.cfg["cam_index"] in cams:
+            idx = cams.index(self.cfg["cam_index"])
+            self.cam_combo.set(labels[idx])
+        elif labels:
+            self.cam_combo.set(labels[0])
+        else:
+            self.cam_combo.set('(aucune caméra trouvée)')
+
+    def _switch_camera(self, event=None):
+        """Changement de source vidéo À CHAUD : arrête le thread caméra,
+        rouvre la nouvelle source, sans redémarrer l'application."""
+        sel = self.cam_combo.get()
+        if not sel or sel.startswith('('):
+            return
+        try:
+            new_index = int(sel.split()[1])
+        except (ValueError, IndexError):
+            return
+        if new_index == self.cfg["cam_index"] and self.cap is not None:
+            return
+        self.cfg["cam_index"] = new_index
+        self._save_cfg()
+        # arrêt propre du thread caméra actuel
+        self.camera_running = False
+        with self.lock:
+            if self.cap is not None:
+                self.cap.release()
+                self.cap = None
+        self.latest_frame = None
+        self.camera_error = None
+        self.hint.set(f"Ouverture de la caméra {new_index}...")
+        # relance
+        self.camera_running = True
+        threading.Thread(target=self._open_camera, daemon=True).start()
+
     def _open_camera(self):
         """Thread séparé : ouvre la caméra sans bloquer l'interface.
         Sous Windows, cv2.VideoCapture peut mettre plusieurs secondes
-        (voire échouer silencieusement) — d'où le backend DirectShow + timeout."""
+        (voire échouer silencieusement) — d'où le backend DirectShow."""
         try:
             import sys
             cap = cv2.VideoCapture(self.cfg["cam_index"], cv2.CAP_DSHOW) \
@@ -486,8 +561,7 @@ class App:
                 ok, frame = cap.read()
             if not ok or frame is None:
                 self.camera_error = ("Caméra introuvable. Vérifie qu'elle est branchée et "
-                                      "autorisée (Confidentialité Windows > Caméra), "
-                                      "ou change cam_index dans grid_config.json.")
+                                      "autorisée (Confidentialité Windows > Caméra).")
                 self.hint.set(self.camera_error)
                 return
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cfg["cam_width"])
@@ -495,8 +569,8 @@ class App:
             self.frame_h, self.frame_w = frame.shape[:2]
             with self.lock:
                 self.cap = cap
-            self.hint.set("Caméra prête ✔ — clique '📍 Calibrer les 4 coins' pour commencer")
-            while self.running:
+            self.hint.set(f"Caméra {self.cfg['cam_index']} prête ✔")
+            while self.camera_running:
                 ok, frame = cap.read()
                 if not ok:
                     time.sleep(0.01)
@@ -607,6 +681,7 @@ class App:
     # ================= fermeture =================
     def _on_close(self):
         self.running = False
+        self.camera_running = False
         time.sleep(0.1)
         self._save_cfg()
         if self.writer:
