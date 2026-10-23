@@ -18,6 +18,12 @@ DEFAULTS = {
     # --- collision ---
     "collision_dist_cells": 0.5,
     "collision_cooldown_s": 2.0,
+    # --- détection par couleur (autocollants) ---
+    "sat_min": 120,
+    "lumi_min": 70,
+    "aire_min": 500,
+    "robot_a_colors": [[0, 10], [170, 180]],
+    "robot_b_colors": [[100, 130]],
     # --- explosion ---
     "explosion_scale": 1.0,
     "explosion_sprites": "assets/explosion_sprites.png",

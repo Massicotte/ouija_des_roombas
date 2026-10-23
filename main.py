@@ -9,6 +9,7 @@ Commandes vidéo : cliquer 4 coins (mode calib), 'r' reset liste, 'q'/ESC quitte
 
 import csv
 import time
+from collections import deque
 import datetime
 import threading
 from pathlib import Path
@@ -20,10 +21,13 @@ from tkinter import ttk, messagebox
 
 from config import load_config, save_config, cell_name, LETTERS
 import aruco_detect
+import color_detect
 
-ROBOT_A = {"name": "Roumba A", "id_key": "robot_a_id", "draw": (60, 60, 230)}
-ROBOT_B = {"name": "Roumba B", "id_key": "robot_b_id", "draw": (230, 120, 40)}
+ROBOT_A = {"name": "Roumba A", "id_key": "robot_a_id", "draw": (60, 60, 230), "trace": (0, 0, 255)}
+ROBOT_B = {"name": "Roumba B", "id_key": "robot_b_id", "draw": (230, 120, 40), "trace": (255, 0, 0)}
 ROBOTS = [ROBOT_A, ROBOT_B]
+
+TRAJ_LENGTH = 2000  # points max gardés par robot pour la trajectoire
 
 DIRECTIONS = {"Horizontal (vers la droite)": "H", "Vertical (vers le bas)": "V"}
 DIR_LABEL = {v: k for k, v in DIRECTIONS.items()}
@@ -229,6 +233,14 @@ class App:
         self.camera_running = True
         self._available_cams = []
         self._disp_offset = (0, 0)
+        # trajectoires : deque par robot (dessinées derrière chaque Roomba)
+        self.trails = {ROBOT_A["name"]: deque(maxlen=TRAJ_LENGTH),
+                       ROBOT_B["name"]: deque(maxlen=TRAJ_LENGTH)}
+        # prétraitement HSV (réglable en live) pour améliorer la détection
+        # quand la luminosité ou la saturation de la scène varie
+        self.hsv_boost = True
+        self.sat_gain = 1.0    # multiplie la saturation
+        self.val_gain = 1.0    # multiplie la luminosité (value)
 
         self._build_ui()
         self._open_outputs()
@@ -346,6 +358,45 @@ class App:
         ttk.Label(cd, textvariable=self.cooldown_label, width=6).pack(side=tk.LEFT)
         self._update_cooldown_label()
         ttk.Button(s, text="💾 Sauvegarder la config", command=self._save_cfg).pack(fill=tk.X, pady=(6, 0))
+
+        # --- Détection couleur (seuils réglables en live) ---
+        d = ttk.LabelFrame(right, text="Détection couleur 🎨", padding=8)
+        d.pack(fill=tk.X, pady=6)
+        ttk.Label(d, text="Saturation min:").grid(row=0, column=0, sticky="w")
+        self.sat_var = tk.IntVar(value=int(self.cfg.get("sat_min", 120)))
+        self.sat_label = tk.StringVar()
+        ttk.Scale(d, from_=0, to=255, variable=self.sat_var,
+                  command=lambda *_: self._apply_color_cfg("sat_min", self.sat_var.get())).grid(row=0, column=1, sticky="we", padx=6)
+        ttk.Label(d, textvariable=self.sat_label, width=4).grid(row=0, column=2)
+        ttk.Label(d, text="Luminosité min:").grid(row=1, column=0, sticky="w")
+        self.lumi_var = tk.IntVar(value=int(self.cfg.get("lumi_min", 70)))
+        self.lumi_label = tk.StringVar()
+        ttk.Scale(d, from_=0, to=255, variable=self.lumi_var,
+                  command=lambda *_: self._apply_color_cfg("lumi_min", self.lumi_var.get())).grid(row=1, column=1, sticky="we", padx=6)
+        ttk.Label(d, textvariable=self.lumi_label, width=4).grid(row=1, column=2)
+        ttk.Label(d, text="Aire min (px):").grid(row=2, column=0, sticky="w")
+        self.aire_var = tk.IntVar(value=int(self.cfg.get("aire_min", 500)))
+        self.aire_label = tk.StringVar()
+        ttk.Scale(d, from_=10, to=20000, variable=self.aire_var,
+                  command=lambda *_: self._apply_color_cfg("aire_min", self.aire_var.get())).grid(row=2, column=1, sticky="we", padx=6)
+        ttk.Label(d, textvariable=self.aire_label, width=7).grid(row=2, column=2)
+        ttk.Button(d, text="🧹 Effacer les traces", command=self._clear_trails).grid(
+            row=3, column=0, columnspan=3, pady=(6, 0), sticky="we")
+        d.columnconfigure(1, weight=1)
+
+    def _apply_color_cfg(self, key, value):
+        self.cfg[key] = int(value)
+        if key == "sat_min":
+            self.sat_label.set(str(int(self.sat_var.get())))
+        elif key == "lumi_min":
+            self.lumi_label.set(str(int(self.lumi_var.get())))
+        elif key == "aire_min":
+            self.aire_label.set(str(int(self.aire_var.get())))
+
+    def _clear_trails(self):
+        for tr in self.trails.values():
+            tr.clear()
+        self.hint.set("Traces effacées")
 
         self.refresh_words()
         self._refresh_events()
@@ -662,14 +713,23 @@ class App:
                 draw_grid_on_view(view, self.mapper, cols, rows)
             if self.show_words:
                 draw_words_on_view(view, self.mapper, cols, rows, self.words)
-        detections = aruco_detect.detect(frame)
-        posA = detections.get(self.cfg[ROBOT_A["id_key"]])
-        posB = detections.get(self.cfg[ROBOT_B["id_key"]])
+        # détection PAR COULEUR (autocollants rouge = A, bleu = B)
+        color_detect.CFG.update(self.cfg)
+        detections = color_detect.detect(frame)
+        posA = detections.get(ROBOT_A["name"])
+        posB = detections.get(ROBOT_B["name"])
         for robot, pos in [(ROBOT_A, posA), (ROBOT_B, posB)]:
             if pos:
-                cv2.circle(view, (int(pos[0]), int(pos[1])), 12, robot["draw"], 3)
-                cv2.putText(view, robot["name"], (int(pos[0]) + 14, int(pos[1]) - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, robot["draw"], 2)
+                # trajectoire : on garde le point et on dessine la trace DERRIÈRE le robot
+                self.trails[robot["name"]].append((int(pos[0]), int(pos[1])))
+                pts = list(self.trails[robot["name"]])
+                for a, b in zip(pts, pts[1:]):
+                    cv2.line(view, a, b, robot["trace"], 2)
+                cv2.circle(view, (int(pos[0]), int(pos[1])), max(6, int(pos[2])),
+                           (255, 255, 255), 1)
+                cv2.circle(view, (int(pos[0]), int(pos[1])), 6, (255, 255, 255), -1)
+                cv2.putText(view, robot["name"], (int(pos[0]) + 12, int(pos[1]) - 12),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, robot["trace"], 2)
 
         if posA and posB and self.mapper:
             cols, rows = self.cfg["cols"], self.cfg["rows"]
