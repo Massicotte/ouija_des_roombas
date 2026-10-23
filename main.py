@@ -63,6 +63,8 @@ def load_cfg():
     cfg = dict(DEFAULTS)
     if CONFIG_FILE.exists():
         cfg.update(json.loads(CONFIG_FILE.read_text()))
+    # accepter les mots des ANCIENS formats : [mot, case, direction] -> [mot, case]
+    cfg["words"] = [[w[0], w[1]] for w in cfg.get("words", []) if len(w) >= 2]
     return cfg
 
 
