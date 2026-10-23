@@ -263,8 +263,27 @@ class App:
         self.hint = tk.StringVar(value="Prêt. Clique 'Calibrer les 4 coins' pour commencer.")
         ttk.Label(left, textvariable=self.hint).pack(anchor="w")
 
-        right = ttk.Frame(self.root, padding=5)
-        right.pack(side=tk.RIGHT, fill=tk.Y)
+        # panneau droit DÉFILABLE : les réglages dépassent la hauteur de la
+        # vidéo -> une scrollbar rend tout accessible (sinon les derniers
+        # panneaux restent invisibles sous le bord de la fenêtre)
+        right_scroll = ttk.Frame(self.root, padding=(0, 5, 5, 5))
+        right_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.right_canvas = tk.Canvas(right_scroll, width=300, highlightthickness=0)
+        right_scrollbar = ttk.Scrollbar(right_scroll, orient="vertical",
+                                        command=self.right_canvas.yview)
+        self.right_canvas.configure(yscrollcommand=right_scrollbar.set)
+        right_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.right_canvas.pack(side=tk.LEFT, fill=tk.Y, expand=True)
+        right = ttk.Frame(self.right_canvas, padding=5)
+        right_window = self.right_canvas.create_window((0, 0), window=right, anchor="nw")
+        right.bind("<Configure>", lambda e: self.right_canvas.configure(
+            scrollregion=self.right_canvas.bbox("all")))
+        self.right_canvas.bind("<Configure>", lambda e: self.right_canvas.itemconfigure(
+            right_window, width=self.right_canvas.winfo_width()))
+        # molette souris = défilement du panneau (Windows: <MouseWheel>)
+        def _on_mousewheel(e):
+            self.right_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        self.right_canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
         # --- Grille ---
         g = ttk.LabelFrame(right, text="Grille", padding=8)
