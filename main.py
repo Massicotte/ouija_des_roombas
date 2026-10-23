@@ -608,19 +608,29 @@ class App:
             self.log.writerow(["timestamp", "robot_a", "robot_b", "cellule", "mot"])
 
     def _probe_cameras(self):
-        """Sonde les index 0..3 en arrière-plan pour lister les sources disponibles."""
+        """Sonde les index 0..3 en arrière-plan pour lister les sources disponibles.
+        Essaie plusieurs backends : DSHOW peut lever une exception C++ sur certaines
+        machines Windows — on retombe sur MSMF puis par défaut."""
         import sys
         found = []
         for i in range(4):
-            try:
-                cap = cv2.VideoCapture(i, cv2.CAP_DSHOW) if sys.platform == "win32" \
-                    else cv2.VideoCapture(i)
-                ok, frame = cap.read()
-                cap.release()
+            ok, frame = False, None
+            for be in ([cv2.CAP_DSHOW, cv2.CAP_MSMF, None] if sys.platform == "win32"
+                       else [None]):
+                try:
+                    cap = cv2.VideoCapture(i, be) if be is not None else cv2.VideoCapture(i)
+                    ok, frame = cap.read()
+                    cap.release()
+                except Exception:
+                    try:
+                        cap.release()
+                    except Exception:
+                        pass
+                    continue
                 if ok and frame is not None:
-                    found.append(i)
-            except Exception:
-                continue
+                    break
+            if ok and frame is not None:
+                found.append(i)
         return found
 
     def _refresh_cam_list(self):
@@ -674,18 +684,30 @@ class App:
 
     def _open_camera(self):
         """Thread séparé : ouvre la caméra sans bloquer l'interface.
-        Sous Windows, cv2.VideoCapture peut mettre plusieurs secondes
-        (voire échouer silencieusement) — d'où le backend DirectShow."""
+        Essaie plusieurs backends : DSHOW peut lever une exception C++ sur
+        certaines machines Windows -> on retombe sur MSMF puis par défaut."""
         try:
             import sys
-            cap = cv2.VideoCapture(self.cfg["cam_index"], cv2.CAP_DSHOW) \
-                if sys.platform == "win32" else cv2.VideoCapture(self.cfg["cam_index"])
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                # 2e tentative sans backend spécifique (webcam virtuelle, etc.)
-                cap.release()
-                cap = cv2.VideoCapture(self.cfg["cam_index"])
-                ok, frame = cap.read()
+            backends = []
+            if sys.platform == "win32":
+                backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, None]
+            cap = None
+            ok, frame = False, None
+            for be in backends:
+                try:
+                    cap = cv2.VideoCapture(self.cfg["cam_index"], be) \
+                        if be is not None else cv2.VideoCapture(self.cfg["cam_index"])
+                    ok, frame = cap.read()
+                    if ok and frame is not None:
+                        break
+                    cap.release()
+                except Exception:
+                    # backend qui lève (ex: exception C++ DSHOW) : passer au suivant
+                    try:
+                        cap.release()
+                    except Exception:
+                        pass
+                    continue
             if not ok or frame is None:
                 self.camera_error = ("Caméra introuvable. Vérifie qu'elle est branchée et "
                                       "autorisée (Confidentialité Windows > Caméra).")
@@ -867,6 +889,19 @@ if __name__ == "__main__":
         _cfg = _config.load_config()
         _cfg["cam_index"] = args.cam
         _config.save_config(_cfg)
-    root = tk.Tk()
-    App(root)
-    root.mainloop()
+    try:
+        root = tk.Tk()
+        App(root)
+        root.mainloop()
+    except SystemExit as e:
+        # erreur fatale volontaire (ex: sprites manquants) : l'afficher ET rester
+        # ouvert pour que l'utilisatrice puisse la lire au lieu d'un écran qui claque
+        import traceback
+        traceback.print_exc()
+        print(f"\nERREUR FATALE : {e}")
+        input("Appuie sur Entrée pour fermer...")
+    except Exception:
+        # TOUT crash doit être visible et lisible, jamais une fermeture silencieuse
+        import traceback
+        traceback.print_exc()
+        input("\nAppuie sur Entrée pour fermer...")
